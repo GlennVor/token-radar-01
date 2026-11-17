@@ -19,10 +19,13 @@
 //   curve(tvl) = exp(a + b x log(tvl))
 //   adjustment(cat) = exp(0.5 x median residual of priced protocols in cat), n >= 3, else 1.0,
 //                     clamped to [0.25, 4.00]
-//   growth        = clamp(change_7d, -60, 120) per cent
-//   growthMult    = 1 + (growth / 100) x GROWTH_WEIGHT
-//   maturity      = 0.6 + min(age_days, 1095) / 1095 x 0.4   (age_days unknown: 365)
-//   implied       = max(1, round(curve(tvl) x adjustment(cat) x growthMult x maturity))
+//   implied       = max(1, round(curve(tvl) x adjustment(cat)))
+//
+// Every number in the model is fitted from the snapshot: no weight is hand-chosen. An earlier
+// version multiplied in a growth factor and a maturity factor; both were dropped after they were
+// tested and found not to earn their keep — the walk-forward error of the full implied value
+// with them was 3.76x, against 2.99x without them, so the model takes the curve and half the
+// category signal and nothing else.
 //
 // The adjustment is halved on purpose: a category's median residual is a real signal, but it is
 // fitted on the protocols that already have a token, and the board prices protocols that do not.
@@ -31,6 +34,14 @@
 // 3.41x with no adjustment at all), so the model takes half the category signal and lets the
 // curve carry the rest. Cross-validation is reported as a fourth check; on it the variants sit
 // within noise of each other.
+//
+// Each row also carries a rank range: the model is refitted on 200 bootstrap resamples of the
+// priced protocols (a fixed seed, so two runs agree), every row is re-ranked under each resample,
+// and the range is the 5th to 95th percentile of its rank, with the same percentiles of its
+// implied value. The range is the model's sampling uncertainty — how much the rank moves when
+// the priced set is redrawn — not the full prediction error, which is the validation multiples
+// below. A rank of 1 with a range of 1–1 is solid; a rank of 100 with a range of 87–219 is not,
+// and the board says so.
 //
 // The whole model is tested four ways on the same snapshot, and the dashboard prints the results:
 // the in-sample median error, the leave-one-out median error (the model refitted without each
@@ -65,13 +76,6 @@ export interface Snapshot {
 
 /** The model's constants, as the dashboard states them. */
 export interface ModelConstants {
-  growth_weight: number;
-  growth_floor: number;
-  growth_cap: number;
-  maturity_floor: number;
-  maturity_range: number;
-  maturity_days: number;
-  unknown_age_days: number;
   adjustment_min: number;
   adjustment_max: number;
   adjustment_min_samples: number;
@@ -79,13 +83,6 @@ export interface ModelConstants {
 }
 
 export const MODEL: ModelConstants = {
-  growth_weight: 0.5,
-  growth_floor: -60,
-  growth_cap: 120,
-  maturity_floor: 0.6,
-  maturity_range: 0.4,
-  maturity_days: 1095,
-  unknown_age_days: 365,
   adjustment_min: 0.25,
   adjustment_max: 4.0,
   adjustment_min_samples: 3,
@@ -93,10 +90,10 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-4';
+export const MODEL_VERSION = 'radar-5';
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
-export const EARLY_ROWS = 160;
+export const EARLY_ROWS = 192;
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -152,12 +149,11 @@ export interface BoardRow {
   token_status: 'pre-token';
   age_days: number | null;
   implied_value_usd: number;
+  rank_range: [number, number];
+  value_range: [number, number];
   model: {
     curve_value_usd: number;
     category_adjustment: number;
-    growth_pct: number;
-    growth_multiplier: number;
-    maturity_multiplier: number;
     age_days: number | null;
   };
   farm_steps: string[];
@@ -178,8 +174,8 @@ export interface RadarRow {
   implied_value_usd: number;
   curve_value_usd: number;
   category_adjustment: number;
-  growth_multiplier: number;
-  maturity_multiplier: number;
+  rank_range: [number, number];
+  value_range: [number, number];
   watchlist: boolean;
   farm_steps: string[];
 }
@@ -460,24 +456,73 @@ function adjustmentFor(category: string | null, adjustments: CategoryAdjustment[
   return row === undefined ? 1 : row.adjustment;
 }
 
-/** The multipliers and the implied value one protocol gets under `model`. */
+/** One protocol's bootstrap range: the 5th–95th percentile of its rank and its implied value. */
+export interface BootstrapRange {
+  rank: [number, number];
+  value: [number, number];
+}
+
+/**
+ * The bootstrap rank range of every board protocol: the model refitted on 200 resamples of the
+ * priced protocols (a fixed seed, so two runs agree), every protocol re-ranked under each
+ * resample, and the 5th–95th percentile of its rank and its implied value. The range is the
+ * model's sampling uncertainty — how much the rank moves when the priced set is redrawn — not
+ * the full prediction error, which is the validation multiples.
+ */
+export function bootstrapRanges(
+  snapshot: Snapshot,
+  board: SnapshotProtocol[],
+  model: ModelConstants,
+  resamples = 200,
+  seed = 11,
+): Map<string, BootstrapRange> {
+  const points = pricedPoints(snapshot);
+  const rand = mulberry32(seed);
+  const rankSamples = new Map<string, number[]>();
+  const valueSamples = new Map<string, number[]>();
+  for (const p of board) {
+    rankSamples.set(p.slug, []);
+    valueSamples.set(p.slug, []);
+  }
+  for (let b = 0; b < resamples; b++) {
+    const sample: PricedPoint[] = [];
+    for (let i = 0; i < points.length; i++) sample.push(points[Math.floor(rand() * points.length)]!);
+    const fitted = fitModel(sample, model);
+    const vals = board.map((p) => {
+      const curveVal = curveValue(fitted.curve, p.tvl_usd);
+      const adj = adjustmentFor(p.category, fitted.adjustments);
+      return { slug: p.slug, value: Math.max(1, Math.round(curveVal * adj)) };
+    });
+    const order = [...vals].sort((a, b) => b.value - a.value || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+    for (let r = 0; r < order.length; r++) {
+      rankSamples.get(order[r]!.slug)!.push(r + 1);
+      valueSamples.get(order[r]!.slug)!.push(order[r]!.value);
+    }
+  }
+  const out = new Map<string, BootstrapRange>();
+  const lo = Math.floor(0.05 * (resamples - 1));
+  const hi = Math.ceil(0.95 * (resamples - 1));
+  for (const p of board) {
+    const ranks = [...rankSamples.get(p.slug)!].sort((a, b) => a - b);
+    const values = [...valueSamples.get(p.slug)!].sort((a, b) => a - b);
+    out.set(p.slug, { rank: [ranks[lo]!, ranks[hi]!], value: [values[lo]!, values[hi]!] });
+  }
+  return out;
+}
+
+/** The implied value one protocol gets under `model`: the curve times its category adjustment. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
   model: ModelConstants,
   curve: SizeCurve,
   adjustments: CategoryAdjustment[],
-): { implied: number; curveValueUsd: number; adjustment: number; growthPct: number; growthMult: number; maturityMult: number; age: number | null } {
+): { implied: number; curveValueUsd: number; adjustment: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
-  const rawGrowth = finite(protocol.change_7d, 0);
-  const growthPct = clamp(rawGrowth, model.growth_floor, model.growth_cap);
-  const growthMult = 1 + (growthPct / 100) * model.growth_weight;
-  const ageForModel = age ?? model.unknown_age_days;
-  const maturityMult = model.maturity_floor + (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
   const curveVal = curveValue(curve, protocol.tvl_usd);
   const adjustment = adjustmentFor(protocol.category, adjustments);
-  const implied = Math.max(1, Math.round(curveVal * adjustment * growthMult * maturityMult));
-  return { implied, curveValueUsd: Math.round(curveVal), adjustment, growthPct, growthMult, maturityMult, age };
+  const implied = Math.max(1, Math.round(curveVal * adjustment));
+  return { implied, curveValueUsd: Math.round(curveVal), adjustment, age };
 }
 
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
@@ -519,8 +564,8 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
   for (const p of early) chosen.set(p.slug, p);
 
   const scored = [...chosen.values()].map((p) => {
-    const { implied, curveValueUsd, adjustment, growthPct, growthMult, maturityMult, age } = impliedValue(p, snapshot.as_of, model, curve, adjustments);
-    return { p, implied, curveValueUsd, adjustment, growthPct, growthMult, maturityMult, age };
+    const { implied, curveValueUsd, adjustment, age } = impliedValue(p, snapshot.as_of, model, curve, adjustments);
+    return { p, implied, curveValueUsd, adjustment, age };
   });
   scored.sort((a, b) => b.implied - a.implied || b.p.tvl_usd - a.p.tvl_usd || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   // Ranks must be strictly ordered by implied value: two rows that price identically are split by
@@ -533,6 +578,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     }
   }
   if (tied > 0) process.stderr.write(`token radar: ${tied} tied implied value${tied === 1 ? '' : 's'} split by $1 to keep ranks strictly ordered\n`);
+  const ranges = bootstrapRanges(snapshot, scored.map((s) => s.p), model);
   return scored.map((s, i) => ({
     rank: i + 1,
     slug: s.p.slug,
@@ -548,12 +594,11 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     token_status: 'pre-token',
     age_days: s.age,
     implied_value_usd: s.implied,
+    rank_range: ranges.get(s.p.slug)!.rank,
+    value_range: ranges.get(s.p.slug)!.value,
     model: {
       curve_value_usd: s.curveValueUsd,
       category_adjustment: round4(s.adjustment),
-      growth_pct: s.growthPct,
-      growth_multiplier: round4(s.growthMult),
-      maturity_multiplier: round4(s.maturityMult),
       age_days: s.age,
     },
     farm_steps: farmSteps(s.p, s.age).map(stepText),
@@ -776,8 +821,8 @@ export function radarRow(row: BoardRow): RadarRow {
     implied_value_usd: row.implied_value_usd,
     curve_value_usd: row.model.curve_value_usd,
     category_adjustment: row.model.category_adjustment,
-    growth_multiplier: row.model.growth_multiplier,
-    maturity_multiplier: row.model.maturity_multiplier,
+    rank_range: row.rank_range,
+    value_range: row.value_range,
     watchlist: false,
     farm_steps: row.farm_steps,
   };

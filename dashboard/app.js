@@ -36,7 +36,7 @@
     '<div><dt>Live tokens</dt><dd>' + R.live_size + '</dd></div>' +
     '<div><dt>Total implied value</dt><dd>' + money(topImplied) + '</dd></div>';
   $('meta').textContent = 'Snapshot ' + R.as_of + ' · watchlist floor ' + money(R.floor_usd) + ' · model ' + R.model_version + ' · ' + esc(R.source);
-  $('methodMeta').textContent = 'Model ' + R.model_version + ': implied = size curve × category adjustment × growth factor × maturity factor. The curve is fitted to this snapshot at run time and the adjustment is halved; nothing is hardcoded by name.';
+  $('methodMeta').textContent = 'Model ' + R.model_version + ': implied = size curve × category adjustment. Both are fitted to this snapshot at run time; nothing is hardcoded by name. Each row also carries a bootstrap rank range: the model refitted on 200 resamples of the priced protocols, the row re-ranked under each.';
 
   // ---- filters ----
   var cats = [];
@@ -87,7 +87,7 @@
       var age = r.age_days === null ? '—' : r.age_days + 'd';
       var pill = r.watchlist ? '<span class="pill">Watchlist</span>' : '<span class="pill early">Early find</span>';
       return '<tr data-slug="' + esc(r.slug) + '"' + (selected === r.slug ? ' class="selected"' : '') + '>' +
-        '<td class="num">' + r.rank + '</td>' +
+        '<td class="num">' + r.rank + '<br><span style="color:var(--muted);font-size:12px">' + r.rank_range[0] + '–' + r.rank_range[1] + '</span></td>' +
         '<td><strong>' + esc(r.name) + '</strong> ' + pill + '<br><span style="color:var(--muted);font-size:12px">' + esc(r.slug) + '</span></td>' +
         '<td>' + esc(r.category || '—') + '</td>' +
         '<td>' + esc(r.chains.slice(0, 3).join(', ')) + (r.chains.length > 3 ? ' +' + (r.chains.length - 3) : '') + '</td>' +
@@ -108,20 +108,18 @@
     for (var i = 0; i < R.rows.length; i++) if (R.rows[i].slug === slug) r = R.rows[i];
     if (!r) return;
     selected = slug;
-    var growthPct = clamp(r.change_7d === null ? 0 : r.change_7d, -60, 120);
-    var ageTxt = r.age_days === null ? 'unknown (counts as 365 days)' : r.age_days + ' days';
-    $('dKicker').textContent = 'Rank #' + r.rank + ' · ' + (r.watchlist ? 'Watchlist' : 'Early find') + ' · ' + (r.category || 'Uncategorised');
+    var ageTxt = r.age_days === null ? 'unknown' : r.age_days + ' days';
+    $('dKicker').textContent = 'Rank #' + r.rank + ' (plausibly #' + r.rank_range[0] + '–' + r.rank_range[1] + ') · ' + (r.watchlist ? 'Watchlist' : 'Early find') + ' · ' + (r.category || 'Uncategorised');
     $('dName').textContent = r.name;
     $('dSub').textContent = r.slug + ' · ' + r.chains.join(', ') + (r.listed_at ? ' · listed ' + r.listed_at : '');
     $('dStats').innerHTML =
       '<div><dt>TVL</dt><dd>' + money(r.tvl_usd) + '</dd></div>' +
       '<div><dt>Implied value</dt><dd>' + money(r.implied_value_usd) + '</dd></div>' +
+      '<div><dt>Plausible value</dt><dd>' + money(r.value_range[0]) + ' – ' + money(r.value_range[1]) + '</dd></div>' +
       '<div><dt>7-day change</dt><dd>' + (r.change_7d === null ? '—' : (r.change_7d > 0 ? '+' : '') + r.change_7d.toFixed(2) + '%') + '</dd></div>' +
       '<div><dt>Age</dt><dd>' + ageTxt + '</dd></div>';
     $('dFormula').textContent =
-      money(r.curve_value_usd) + ' (size curve) × ' + r.category_adjustment.toFixed(4) + ' (' + (r.category || 'Unknown') + ' adjustment) × ' +
-      r.growth_multiplier.toFixed(4) + ' (growth, 7d ' + (r.change_7d === null ? 'unreported' : growthPct.toFixed(2) + '%') + ') × ' +
-      r.maturity_multiplier.toFixed(4) + ' (maturity) = ' + money(r.implied_value_usd) + '.';
+      money(r.curve_value_usd) + ' (size curve) × ' + r.category_adjustment.toFixed(4) + ' (' + (r.category || 'Unknown') + ' adjustment) = ' + money(r.implied_value_usd) + '.';
     $('dSteps').innerHTML = r.farm_steps.map(function (s) { return '<li>' + esc(s) + '</li>'; }).join('');
     $('detail').hidden = false;
     renderBoard();

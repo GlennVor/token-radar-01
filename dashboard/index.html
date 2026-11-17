@@ -9,7 +9,7 @@
 <body>
 <header class="top">
   <div class="wrap">
-    <p class="kicker">Token launch radar · model radar-4</p>
+    <p class="kicker">Token launch radar · model radar-5</p>
     <h1>Which protocol's token would be worth the most?</h1>
     <p class="lede">Every protocol in the snapshot that records no token, ranked by what its launch would be
     worth if its record stayed as it is — with the steps to farm each one. Implied value is this
@@ -64,7 +64,7 @@
         <tbody id="rows"></tbody>
       </table>
     </div>
-    <p class="hint">Click a row for the protocol's detail and farm plan. Click a column heading to sort.</p>
+    <p class="hint">Click a row for the protocol's detail and farm plan. Click a column heading to sort. The small number under each rank is the row's bootstrap rank range.</p>
   </section>
 
   <section id="detail" class="detail" aria-label="Protocol detail" hidden>
@@ -99,7 +99,7 @@
 
   <section aria-label="Method">
     <h2>How the ranking works</h2>
-    <p>Implied value = size curve × category adjustment × growth factor × maturity factor.</p>
+    <p>Implied value = size curve × category adjustment.</p>
     <ul>
       <li><strong>Size curve.</strong> log(market cap) = a + b·log(TVL), fitted by least squares over the
       priced protocols in this snapshot — the ones that already have a token. A protocol's curve
@@ -111,19 +111,25 @@
       already have a token, and the board prices protocols that do not, so the model takes half
       of it. A category with fewer than three priced protocols gets no adjustment (1.000) — the
       curve alone prices it. Adjustments are clamped to 0.25–4.00.</li>
-      <li><strong>Growth factor.</strong> 1 + (7-day TVL change, clamped to −60%…+120%) × 0.5.</li>
-      <li><strong>Maturity factor.</strong> 0.6 + min(age in days, 1095) / 1095 × 0.4. A protocol with no
-      listing date counts as 365 days old.</li>
+      <li><strong>Rank range.</strong> Every row carries a range, from 200 bootstrap resamples of the
+      priced protocols: the model is refitted on each resample, every row is re-ranked, and the
+      range is the 5th to 95th percentile of its rank, with the same percentiles of its implied
+      value. The range is the model's sampling uncertainty — how much the rank moves when the
+      priced set is redrawn — not the full prediction error, which is the validation below. A rank
+      of 1 with a range of 1–1 is solid; a rank of 100 with a range of 87–219 is not, and the
+      board says so.</li>
     </ul>
     <h3>How the model was tested</h3>
     <p>Four tests on the same snapshot, each the median absolute error as a multiple of the true
     market cap — a smaller multiple is a better-tested model. Leave-one-out refits the model
     without each protocol in turn; walk-forward fits it on the oldest 70% of the priced protocols
     by listing date and tests it on the newest 30%; five-fold cross-validation shuffles the priced
-    protocols with a fixed seed and holds each fifth out in turn. Halving the category adjustment
-    is what the walk-forward test chose: it is the best of the three variants on the newest
-    protocols, the ones the model has never priced. Cross-validation is reported as a fourth check;
-    on it the variants sit within noise of each other.</p>
+    protocols with a fixed seed and holds each fifth out in turn. The tests measure the whole
+    model, the same implied values the board shows. Halving the category adjustment is what the
+    walk-forward test chose: it is the best of the three variants on the newest protocols, the
+    ones the model has never priced. An earlier version also multiplied in a growth factor and a
+    maturity factor; both were dropped after testing showed they did not earn their keep — the
+    walk-forward error with them was 3.76×, against 2.99× without them.</p>
     <dl class="stats" id="validStats"></dl>
     <h3>Category adjustments, from this snapshot</h3>
     <div class="table-wrap">
