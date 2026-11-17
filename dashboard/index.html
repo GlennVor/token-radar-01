@@ -9,7 +9,7 @@
 <body>
 <header class="top">
   <div class="wrap">
-    <p class="kicker">Token launch radar · model radar-2</p>
+    <p class="kicker">Token launch radar · model radar-3</p>
     <h1>Which protocol's token would be worth the most?</h1>
     <p class="lede">Every protocol in the snapshot that records no token, ranked by what its launch would be
     worth if its record stayed as it is — with the steps to farm each one. Implied value is this
@@ -57,7 +57,7 @@
             <th data-sort="tvl_usd" class="num">TVL</th>
             <th data-sort="change_7d" class="num">7d</th>
             <th data-sort="age_days" class="num">Age</th>
-            <th data-sort="category_multiple" class="num">Multiple</th>
+            <th data-sort="category_adjustment" class="num">Adj.</th>
             <th data-sort="implied_value_usd" class="num">Implied value</th>
           </tr>
         </thead>
@@ -86,7 +86,7 @@
   <section aria-label="Live tokens">
     <h2>Already trading — the market's own values</h2>
     <p>These protocols already have a token, so the board shows the market's value, not a model's.
-    They are the comparables the multiples above are priced from.</p>
+    They are the comparables the size curve is fitted on.</p>
     <div class="table-wrap">
       <table id="live">
         <thead>
@@ -99,21 +99,31 @@
 
   <section aria-label="Method">
     <h2>How the ranking works</h2>
-    <p>Implied value = TVL × category multiple × growth factor × maturity factor.</p>
+    <p>Implied value = size curve × category adjustment × growth factor × maturity factor.</p>
     <ul>
-      <li><strong>Category multiple.</strong> The median market-cap-to-TVL ratio of the protocols in the
-      same category that already have a priced token. A category with fewer than three priced
-      protocols falls back to the median over every priced protocol (0.214). Multiples are clamped
-      to 0.05–0.75.</li>
+      <li><strong>Size curve.</strong> log(market cap) = a + b·log(TVL), fitted by least squares over the
+      priced protocols in this snapshot — the ones that already have a token. A protocol's curve
+      value is the market cap the curve predicts for its TVL. The curve's slope is below one, so
+      market cap grows slower than TVL: a flat multiple would overprice the largest protocols.</li>
+      <li><strong>Category adjustment.</strong> The median residual of the priced protocols in the same
+      category, exponentiated, when the category has at least three priced protocols. A category
+      with fewer gets no adjustment (1.000) — the curve alone prices it. Adjustments are clamped
+      to 0.25–4.00.</li>
       <li><strong>Growth factor.</strong> 1 + (7-day TVL change, clamped to −60%…+120%) × 0.5.</li>
       <li><strong>Maturity factor.</strong> 0.6 + min(age in days, 1095) / 1095 × 0.4. A protocol with no
       listing date counts as 365 days old.</li>
     </ul>
-    <h3>Category multiples, from this snapshot</h3>
+    <h3>How the curve was tested</h3>
+    <p>Three tests on the same snapshot, each the median absolute error as a multiple of the true
+    market cap — a smaller multiple is a better-tested curve. Leave-one-out refits the curve
+    without each protocol in turn; walk-forward fits it on the oldest 70% of the priced protocols
+    by listing date and tests it on the newest 30%.</p>
+    <dl class="stats" id="validStats"></dl>
+    <h3>Category adjustments, from this snapshot</h3>
     <div class="table-wrap">
-      <table id="mults">
-        <thead><tr><th>Category</th><th class="num">Multiple</th><th class="num">Priced protocols</th><th>Note</th></tr></thead>
-        <tbody id="multRows"></tbody>
+      <table id="adjs">
+        <thead><tr><th>Category</th><th class="num">Adjustment</th><th class="num">Priced protocols</th><th>Note</th></tr></thead>
+        <tbody id="adjRows"></tbody>
       </table>
     </div>
     <p class="meta" id="methodMeta"></p>

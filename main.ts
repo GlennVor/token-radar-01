@@ -1,4 +1,4 @@
-// Token radar entry (Node 22, standard library only), model radar-2.
+// Token radar entry (Node 22, standard library only), model radar-3.
 //
 // Reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>), scores every
 // pre-token protocol with the model in lib/model.ts, writes the ranked board to /output/board.json,
@@ -74,7 +74,7 @@ if (dashFiles.length === 0) {
 }
 const shots = copyFiles(join(here, 'screenshots'), join(out, 'screenshots'));
 if (shots.length < 3) {
-  process.stderr.write(`token radar: screenshots/ holds ${shots.length} image${shots.length === 1 ? '' : 's'}: hand in 3, the board, a detail view and a filtered view\n`);
+  process.stderr.write(`token radar: screenshots/ holds ${shots.length} image${shots.length === 1 ? '' : 's'}: hand in 3 or 4, the board, a detail view, a filtered view and the method panel\n`);
   process.exit(1);
 }
 for (const name of shots) {

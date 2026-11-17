@@ -1,7 +1,7 @@
 // Token Radar dashboard: renders window.RADAR with no network. The board is sortable and
 // filterable, every row opens a detail view with its model breakdown and farm plan, and the live
-// section shows the protocols that already trade. Farm plans are generated here from the same
-// rules as lib/model.ts, so the page and board.json agree step for step.
+// section shows the protocols that already trade. Farm plans come from the board itself
+// (data.js), so the page and board.json agree step for step by construction.
 
 (function () {
   'use strict';
@@ -27,81 +27,6 @@
   };
   var clamp = function (v, lo, hi) { return Math.min(hi, Math.max(lo, v)); };
 
-  // ---- farm plan: the same rules as lib/model.ts farmSteps, so the page matches board.json ----
-  function chainOf(row) { return row.chains.length > 0 ? row.chains[0] : 'its main chain'; }
-  function capitalFor(row) {
-    if (row.tvl_usd >= 5000000000) return 250;
-    if (row.tvl_usd >= 1000000000) return 150;
-    if (row.tvl_usd >= 100000000) return 100;
-    return 50;
-  }
-  function holdDaysFor(age) {
-    if (age === null || age === undefined) return 30;
-    if (age < 180) return 60;
-    if (age < 365) return 45;
-    return 30;
-  }
-  function actionFor(row, capital, chain) {
-    var c = (row.category || '').toLowerCase();
-    var name = row.name;
-    if (c.indexOf('curator') >= 0 || c.indexOf('allocator') >= 0 || c.indexOf('vault') >= 0) {
-      return 'Deposit $' + capital + ' into a ' + name + ' vault on ' + chain + ' and hold the vault shares; the vault\'s own page shows which strategy the deposit follows.';
-    }
-    if (c.indexOf('rwa') >= 0 || c.indexOf('real world') >= 0) {
-      return 'Mint $' + capital + ' of the protocol\'s yield-bearing asset on ' + chain + ' and hold it in the same wallet.';
-    }
-    if (c.indexOf('lend') >= 0 || c.indexOf('cdp') >= 0 || c.indexOf('collateral') >= 0) {
-      return 'Supply $' + capital + ' of USDC to ' + name + ' on ' + chain + ' and leave the supply position open.';
-    }
-    if (c.indexOf('dex') >= 0 || c.indexOf('leveraged farm') >= 0) {
-      return 'Provide $' + capital + ' of liquidity to ' + name + '\'s main pool on ' + chain + ' and keep the position open.';
-    }
-    if (c.indexOf('yield') >= 0 || c.indexOf('aggregator') >= 0) {
-      return 'Deposit $' + capital + ' into ' + name + '\'s highest-TVL strategy on ' + chain + ' and keep the position open.';
-    }
-    if (c.indexOf('bridge') >= 0) {
-      return 'Bridge $' + capital + ' of USDC to ' + chain + ' through ' + name + ' and use the bridged funds inside its app.';
-    }
-    if (c.indexOf('staking') >= 0 || c.indexOf('restak') >= 0) {
-      return 'Stake $' + capital + ' of the chain\'s staking asset through ' + name + ' and keep the receipt token.';
-    }
-    if (c.indexOf('perpetual') >= 0 || c.indexOf('derivative') >= 0 || c.indexOf('basis') >= 0) {
-      return 'Deposit $' + capital + ' of USDC as margin on ' + name + ' and open one small hedged position.';
-    }
-    if (c.indexOf('prediction') >= 0) {
-      return 'Fund $' + capital + ' and place one market position on ' + name + '.';
-    }
-    if (c.indexOf('stable') >= 0) {
-      return 'Mint or deposit $' + capital + ' of the stable asset through ' + name + ' on ' + chain + '.';
-    }
-    if (c.indexOf('insurance') >= 0) {
-      return 'Buy $' + capital + ' of cover from ' + name + ' on ' + chain + ' and keep the policy active.';
-    }
-    if (c.indexOf('payment') >= 0) {
-      return 'Route $' + capital + ' of payments through ' + name + ' on ' + chain + ' and keep the receipts.';
-    }
-    if (c.indexOf('chain') >= 0) {
-      return 'Bridge $' + capital + ' to the chain ' + name + ' runs on and use one of its native apps.';
-    }
-    return 'Deposit $' + capital + ' of USDC into ' + name + ' on ' + chain + ' and keep the position open.';
-  }
-  function farmSteps(row) {
-    var chain = chainOf(row);
-    var capital = capitalFor(row);
-    var hold = holdDaysFor(row.age_days);
-    var gas = capital >= 150 ? 8 : 4;
-    var action = actionFor(row, capital, chain);
-    var steps = [
-      { text: 'Set aside a fresh wallet that holds only the funds you plan to farm, and store its seed phrase offline, never in a screenshot or a chat.', cost: 'under $3 of gas for the first transaction', time: '5 minutes' },
-      { text: action, cost: '$' + capital + ' of capital and about $' + gas + ' of gas', time: '15 minutes to set up' },
-      { text: 'Do one qualifying action each week on ' + chain + ', such as a deposit, a swap, a vote or a claim, so the wallet reads as active rather than one-off.', cost: 'about $2 of gas a week', time: '10 minutes a week' },
-      { text: 'Hold the position for at least ' + hold + ' days so the activity is counted in more than one snapshot.', cost: 'the $' + capital + ' stays in the position', time: hold + ' days' },
-      { text: 'Before you withdraw, open the protocol\'s own points or rewards page from its official site and claim only from the link it publishes.', cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
-      { text: 'Write the wallet, the dates and every transaction hash in a farm log, so you can repeat the position on another wallet or unwind it cleanly.', cost: 'nothing but the log', time: '5 minutes' },
-    ];
-    return steps.map(function (s) { return s.text + ' Cost: ' + s.cost + '. Time: ' + s.time + '.'; });
-  }
-
   // ---- header stats ----
   var topImplied = R.rows.reduce(function (a, b) { return a + b.implied_value_usd; }, 0);
   $('stats').innerHTML =
@@ -111,7 +36,7 @@
     '<div><dt>Live tokens</dt><dd>' + R.live_size + '</dd></div>' +
     '<div><dt>Total implied value</dt><dd>' + money(topImplied) + '</dd></div>';
   $('meta').textContent = 'Snapshot ' + R.as_of + ' · watchlist floor ' + money(R.floor_usd) + ' · model ' + R.model_version + ' · ' + esc(R.source);
-  $('methodMeta').textContent = 'Model ' + R.model_version + ': implied = TVL × category multiple × growth factor × maturity factor. Multiples computed from this snapshot at run time; nothing is hardcoded by name.';
+  $('methodMeta').textContent = 'Model ' + R.model_version + ': implied = size curve × category adjustment × growth factor × maturity factor. The curve is fitted to this snapshot at run time; nothing is hardcoded by name.';
 
   // ---- filters ----
   var cats = [];
@@ -169,7 +94,7 @@
         '<td class="num">' + money(r.tvl_usd) + '</td>' +
         '<td class="num">' + pct(r.change_7d) + '</td>' +
         '<td class="num">' + age + '</td>' +
-        '<td class="num">' + r.category_multiple.toFixed(3) + '</td>' +
+        '<td class="num">' + r.category_adjustment.toFixed(3) + '</td>' +
         '<td class="num"><strong>' + money(r.implied_value_usd) + '</strong></td>' +
         '</tr>';
     }).join('') || '<tr><td colspan="9">No protocols match these filters.</td></tr>';
@@ -194,10 +119,10 @@
       '<div><dt>7-day change</dt><dd>' + (r.change_7d === null ? '—' : (r.change_7d > 0 ? '+' : '') + r.change_7d.toFixed(2) + '%') + '</dd></div>' +
       '<div><dt>Age</dt><dd>' + ageTxt + '</dd></div>';
     $('dFormula').textContent =
-      money(r.tvl_usd) + ' TVL × ' + r.category_multiple.toFixed(3) + ' (' + (r.category || 'Unknown') + ' multiple) × ' +
+      money(r.curve_value_usd) + ' (size curve) × ' + r.category_adjustment.toFixed(4) + ' (' + (r.category || 'Unknown') + ' adjustment) × ' +
       r.growth_multiplier.toFixed(4) + ' (growth, 7d ' + (r.change_7d === null ? 'unreported' : growthPct.toFixed(2) + '%') + ') × ' +
       r.maturity_multiplier.toFixed(4) + ' (maturity) = ' + money(r.implied_value_usd) + '.';
-    $('dSteps').innerHTML = farmSteps(r).map(function (s) { return '<li>' + esc(s) + '</li>'; }).join('');
+    $('dSteps').innerHTML = r.farm_steps.map(function (s) { return '<li>' + esc(s) + '</li>'; }).join('');
     $('detail').hidden = false;
     renderBoard();
     $('detail').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -213,12 +138,21 @@
       '<td class="num">' + pct(p.change_7d) + '</td></tr>';
   }).join('');
 
-  // ---- multiples table ----
-  $('multRows').innerHTML = R.multiples.map(function (m) {
+  // ---- curve validation ----
+  var v = R.validation;
+  $('validStats').innerHTML =
+    '<div><dt>In-sample error</dt><dd>' + v.in_sample_multiple.toFixed(2) + '×</dd></div>' +
+    '<div><dt>Leave-one-out error</dt><dd>' + v.loo_multiple.toFixed(2) + '×</dd></div>' +
+    '<div><dt>Walk-forward error</dt><dd>' + v.walk_forward_multiple.toFixed(2) + '×</dd></div>' +
+    '<div><dt>Priced protocols</dt><dd>' + v.priced_samples + '</dd></div>' +
+    '<div><dt>Curve</dt><dd>' + R.curve.intercept.toFixed(2) + ' + ' + R.curve.slope.toFixed(3) + '·log TVL</dd></div>';
+
+  // ---- category adjustments ----
+  $('adjRows').innerHTML = R.adjustments.map(function (m) {
     return '<tr><td>' + esc(m.category) + '</td>' +
-      '<td class="num">' + m.multiple.toFixed(3) + '</td>' +
+      '<td class="num">' + m.adjustment.toFixed(3) + '</td>' +
       '<td class="num">' + m.samples + '</td>' +
-      '<td>' + (m.fallback ? 'Fewer than 3 priced protocols — global median' : 'Median of priced protocols in this category') + '</td></tr>';
+      '<td>' + (m.adjusted ? 'Median residual of priced protocols in this category' : 'Fewer than 3 priced protocols — the curve alone prices it') + '</td></tr>';
   }).join('');
 
   // ---- events ----
