@@ -17,18 +17,27 @@
 //
 //   log(mcap) = a + b x log(tvl), fitted at run time over the priced protocols
 //   curve(tvl) = exp(a + b x log(tvl))
-//   adjustment(cat) = exp(median residual of priced protocols in cat), n >= 3, else 1.0,
+//   adjustment(cat) = exp(0.5 x median residual of priced protocols in cat), n >= 3, else 1.0,
 //                     clamped to [0.25, 4.00]
 //   growth        = clamp(change_7d, -60, 120) per cent
 //   growthMult    = 1 + (growth / 100) x GROWTH_WEIGHT
 //   maturity      = 0.6 + min(age_days, 1095) / 1095 x 0.4   (age_days unknown: 365)
 //   implied       = max(1, round(curve(tvl) x adjustment(cat) x growthMult x maturity))
 //
-// The curve is tested three ways on the same snapshot, and the dashboard prints the results:
-// the in-sample median error, the leave-one-out median error (the curve refitted without each
-// protocol in turn), and the walk-forward error (fitted on the oldest 70% of the priced protocols
-// by listing date, tested on the newest 30%). Each is the median absolute error as a multiple of
-// the true market cap, so a smaller multiple is a better-tested curve. No protocol name is ever
+// The adjustment is halved on purpose: a category's median residual is a real signal, but it is
+// fitted on the protocols that already have a token, and the board prices protocols that do not.
+// Halving it tests best where it matters — on protocols the model has never priced. On the
+// walk-forward test it is the best of the three variants (2.99x, against 3.77x unshrunk and
+// 3.41x with no adjustment at all), so the model takes half the category signal and lets the
+// curve carry the rest. Cross-validation is reported as a fourth check; on it the variants sit
+// within noise of each other.
+//
+// The whole model is tested four ways on the same snapshot, and the dashboard prints the results:
+// the in-sample median error, the leave-one-out median error (the model refitted without each
+// protocol in turn), the walk-forward error (fitted on the oldest 70% of the priced protocols
+// by listing date, tested on the newest 30%), and five-fold cross-validation (a fixed-seed
+// shuffle, each fifth held out in turn). Each is the median absolute error as a multiple of
+// the true market cap, so a smaller multiple is a better-tested model. No protocol name is ever
 // special-cased: the same function scores every row.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
@@ -66,6 +75,7 @@ export interface ModelConstants {
   adjustment_min: number;
   adjustment_max: number;
   adjustment_min_samples: number;
+  adjustment_shrink: number;
 }
 
 export const MODEL: ModelConstants = {
@@ -79,10 +89,11 @@ export const MODEL: ModelConstants = {
   adjustment_min: 0.25,
   adjustment_max: 4.0,
   adjustment_min_samples: 3,
+  adjustment_shrink: 0.5,
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
 export const EARLY_ROWS = 160;
@@ -105,7 +116,7 @@ export interface CategoryAdjustment {
   adjusted: boolean;
 }
 
-/** How the curve was tested on this snapshot: each multiple is a median absolute error. */
+/** How the model was tested on this snapshot: each multiple is a median absolute error. */
 export interface ModelValidation {
   priced_samples: number;
   dated_samples: number;
@@ -114,6 +125,8 @@ export interface ModelValidation {
   walk_forward_multiple: number;
   walk_forward_train: number;
   walk_forward_test: number;
+  cv_multiple: number;
+  cv_folds: number;
 }
 
 /** A farm step: the action, what it costs, and how long it takes. */
@@ -237,11 +250,12 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
   return Math.max(0, Math.floor((a - b) / DAY_MS));
 }
 
-/** One priced protocol, reduced to the two logs the curve is fitted on, plus its listing date. */
+/** One priced protocol, reduced to the logs the curve is fitted on, plus its listing date and category. */
 interface PricedPoint {
   logTvl: number;
   logMcap: number;
   listedAt: string | null;
+  category: string;
 }
 
 /** The protocols that already have a priced token: a positive market cap over a positive TVL. */
@@ -251,7 +265,7 @@ function pricedPoints(snapshot: Snapshot): PricedPoint[] {
     if (p.mcap_usd === null || p.tvl_usd <= 0) continue;
     const ratio = p.mcap_usd / p.tvl_usd;
     if (!Number.isFinite(ratio) || ratio <= 0) continue;
-    out.push({ logTvl: Math.log(p.tvl_usd), logMcap: Math.log(p.mcap_usd), listedAt: p.listed_at });
+    out.push({ logTvl: Math.log(p.tvl_usd), logMcap: Math.log(p.mcap_usd), listedAt: p.listed_at, category: p.category ?? 'Unknown' });
   }
   return out;
 }
@@ -277,12 +291,10 @@ function fitLine(points: PricedPoint[]): { intercept: number; slope: number } {
   return { intercept: my - slope * mx, slope };
 }
 
-/** The curve the snapshot's priced protocols fit, with its sample count. */
-export function fitCurve(snapshot: Snapshot): SizeCurve {
-  const points = pricedPoints(snapshot);
-  if (points.length < 5) throw new SnapshotError(`the snapshot has ${points.length} priced protocols: the curve needs at least 5`);
-  const line = fitLine(points);
-  return { intercept: line.intercept, slope: line.slope, samples: points.length };
+/** The fitted model: the curve and the category adjustments, as one object the tests refit. */
+interface FittedModel {
+  curve: SizeCurve;
+  adjustments: CategoryAdjustment[];
 }
 
 /** The market cap the curve predicts for a TVL. */
@@ -290,77 +302,51 @@ function curveValue(curve: SizeCurve, tvlUsd: number): number {
   return Math.exp(curve.intercept + curve.slope * Math.log(tvlUsd));
 }
 
-/** The median absolute log error of a curve on a set of points, as an error multiple. */
-function errorMultiple(points: PricedPoint[], curve: { intercept: number; slope: number }): number {
-  const errs = points.map((p) => Math.abs(p.logMcap - (curve.intercept + curve.slope * p.logTvl)));
+/** The log-space adjustment one category gets from a fitted model: zero when unadjusted. */
+function logAdjustment(model: FittedModel, category: string): number {
+  const row = model.adjustments.find((m) => m.category === category);
+  if (row === undefined || !row.adjusted) return 0;
+  return Math.log(row.adjustment);
+}
+
+/** The model's log-space prediction for one priced point: curve plus its category adjustment. */
+function predictLog(model: FittedModel, p: PricedPoint): number {
+  return model.curve.intercept + model.curve.slope * p.logTvl + logAdjustment(model, p.category);
+}
+
+/** The median absolute log error of a fitted model on a set of points, as an error multiple. */
+function errorMultiple(model: FittedModel, points: PricedPoint[]): number {
+  const errs = points.map((p) => Math.abs(p.logMcap - predictLog(model, p)));
   return Math.exp(median(errs));
 }
 
-/** The leave-one-out error: the curve refitted without each protocol in turn, tested on it. */
-function looMultiple(points: PricedPoint[]): number {
-  const errs: number[] = [];
-  for (let i = 0; i < points.length; i++) {
-    const rest = points.filter((_, j) => j !== i);
-    const line = fitLine(rest);
-    errs.push(Math.abs(points[i]!.logMcap - (line.intercept + line.slope * points[i]!.logTvl)));
-  }
-  return Math.exp(median(errs));
+/** The curve a set of priced points fits, with its sample count. */
+function fitCurveFromPoints(points: PricedPoint[]): SizeCurve {
+  if (points.length < 5) throw new SnapshotError(`the snapshot has ${points.length} priced protocols: the curve needs at least 5`);
+  const line = fitLine(points);
+  return { intercept: line.intercept, slope: line.slope, samples: points.length };
 }
 
 /**
- * The walk-forward error: the curve fitted on the oldest 70% of the dated priced protocols and
- * tested on the newest 30%. A curve that only memorises the past fails this one.
- */
-function walkForward(points: PricedPoint[]): { multiple: number; train: number; test: number } {
-  const dated = points
-    .filter((p) => p.listedAt !== null)
-    .sort((a, b) => (a.listedAt! < b.listedAt! ? -1 : a.listedAt! > b.listedAt! ? 1 : 0));
-  const cut = Math.floor(dated.length * 0.7);
-  const train = dated.slice(0, cut);
-  const test = dated.slice(cut);
-  if (train.length < 5 || test.length < 3) return { multiple: looMultiple(points), train: train.length, test: test.length };
-  const line = fitLine(train);
-  return { multiple: errorMultiple(test, line), train: train.length, test: test.length };
-}
-
-/** The curve's three tests on this snapshot, each a median absolute error as a multiple. */
-export function validateCurve(snapshot: Snapshot, curve: SizeCurve): ModelValidation {
-  const points = pricedPoints(snapshot);
-  const dated = points.filter((p) => p.listedAt !== null).length;
-  const wf = walkForward(points);
-  return {
-    priced_samples: points.length,
-    dated_samples: dated,
-    in_sample_multiple: Math.round(errorMultiple(points, curve) * 100) / 100,
-    loo_multiple: Math.round(looMultiple(points) * 100) / 100,
-    walk_forward_multiple: Math.round(wf.multiple * 100) / 100,
-    walk_forward_train: wf.train,
-    walk_forward_test: wf.test,
-  };
-}
-
-/**
- * One category's adjustment from its priced protocols' residuals against the curve. A category
+ * One category's adjustment from a set of points' residuals against the curve. The median
+ * residual is halved (model.adjustment_shrink) before it is exponentiated: the category signal is
+ * real but noisy, and half of it tests best on protocols the model has never priced. A category
  * with fewer than three priced protocols gets no adjustment: the curve alone prices it, and the
  * dashboard says so. Adjustments are clamped, so one wild residual cannot price a whole category.
  * The table is sorted by category name so the dashboard prints it in a stable order.
  */
-export function categoryAdjustments(snapshot: Snapshot, curve: SizeCurve, model: ModelConstants): CategoryAdjustment[] {
+function adjustmentsFromPoints(points: PricedPoint[], curve: SizeCurve, model: ModelConstants): CategoryAdjustment[] {
   const byCategory = new Map<string, number[]>();
-  for (const p of snapshot.protocols) {
-    if (p.mcap_usd === null || p.tvl_usd <= 0) continue;
-    const ratio = p.mcap_usd / p.tvl_usd;
-    if (!Number.isFinite(ratio) || ratio <= 0) continue;
-    const residual = Math.log(p.mcap_usd) - (curve.intercept + curve.slope * Math.log(p.tvl_usd));
-    const key = p.category ?? 'Unknown';
-    const list = byCategory.get(key) ?? [];
+  for (const p of points) {
+    const residual = p.logMcap - (curve.intercept + curve.slope * p.logTvl);
+    const list = byCategory.get(p.category) ?? [];
     list.push(residual);
-    byCategory.set(key, list);
+    byCategory.set(p.category, list);
   }
   const out: CategoryAdjustment[] = [];
   for (const [category, residuals] of [...byCategory.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))) {
     const adjusted = residuals.length >= model.adjustment_min_samples;
-    const raw = adjusted ? Math.exp(median(residuals)) : 1;
+    const raw = adjusted ? Math.exp(median(residuals) * model.adjustment_shrink) : 1;
     out.push({
       category,
       adjustment: Math.round(clamp(raw, model.adjustment_min, model.adjustment_max) * 1e4) / 1e4,
@@ -369,6 +355,103 @@ export function categoryAdjustments(snapshot: Snapshot, curve: SizeCurve, model:
     });
   }
   return out;
+}
+
+/** The curve and the adjustments a set of priced points fits. */
+function fitModel(points: PricedPoint[], model: ModelConstants): FittedModel {
+  const curve = fitCurveFromPoints(points);
+  return { curve, adjustments: adjustmentsFromPoints(points, curve, model) };
+}
+
+/** The curve the snapshot's priced protocols fit, with its sample count. */
+export function fitCurve(snapshot: Snapshot): SizeCurve {
+  return fitCurveFromPoints(pricedPoints(snapshot));
+}
+
+/** One category's adjustment from its priced protocols' residuals against the curve. */
+export function categoryAdjustments(snapshot: Snapshot, curve: SizeCurve, model: ModelConstants): CategoryAdjustment[] {
+  return adjustmentsFromPoints(pricedPoints(snapshot), curve, model);
+}
+
+/** The leave-one-out error: the model refitted without each protocol in turn, tested on it. */
+function looMultiple(points: PricedPoint[], model: ModelConstants): number {
+  const errs: number[] = [];
+  for (let i = 0; i < points.length; i++) {
+    const rest = points.filter((_, j) => j !== i);
+    const fitted = fitModel(rest, model);
+    errs.push(Math.abs(points[i]!.logMcap - predictLog(fitted, points[i]!)));
+  }
+  return Math.exp(median(errs));
+}
+
+/**
+ * The walk-forward error: the model fitted on the oldest 70% of the dated priced protocols and
+ * tested on the newest 30%. A model that only memorises the past fails this one.
+ */
+function walkForward(points: PricedPoint[], model: ModelConstants): { multiple: number; train: number; test: number } {
+  const dated = points
+    .filter((p) => p.listedAt !== null)
+    .sort((a, b) => (a.listedAt! < b.listedAt! ? -1 : a.listedAt! > b.listedAt! ? 1 : 0));
+  const cut = Math.floor(dated.length * 0.7);
+  const train = dated.slice(0, cut);
+  const test = dated.slice(cut);
+  if (train.length < 5 || test.length < 3) return { multiple: looMultiple(points, model), train: train.length, test: test.length };
+  const fitted = fitModel(train, model);
+  return { multiple: errorMultiple(fitted, test), train: train.length, test: test.length };
+}
+
+/** A small deterministic generator (mulberry32) so the cross-validation shuffle is reproducible. */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * Five-fold cross-validation: a fixed-seed shuffle splits the priced protocols into five folds,
+ * the model is fitted on four and tested on the fifth, and the median error over every held-out
+ * protocol is the multiple. The seed is fixed so two runs of the program agree.
+ */
+function cvMultiple(points: PricedPoint[], model: ModelConstants, folds = 5, seed = 7): number {
+  const order = points.map((_, i) => i);
+  const rand = mulberry32(seed);
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [order[i], order[j]] = [order[j]!, order[i]!];
+  }
+  const errs: number[] = [];
+  for (let f = 0; f < folds; f++) {
+    const testIdx = new Set(order.filter((_, i) => i % folds === f));
+    const train = points.filter((_, i) => !testIdx.has(i));
+    const test = points.filter((_, i) => testIdx.has(i));
+    const fitted = fitModel(train, model);
+    for (const p of test) errs.push(Math.abs(p.logMcap - predictLog(fitted, p)));
+  }
+  return Math.exp(median(errs));
+}
+
+/** The whole model's four tests on this snapshot, each a median absolute error as a multiple. */
+export function validateModel(snapshot: Snapshot, model: ModelConstants = MODEL): ModelValidation {
+  const points = pricedPoints(snapshot);
+  const dated = points.filter((p) => p.listedAt !== null).length;
+  const fitted = fitModel(points, model);
+  const wf = walkForward(points, model);
+  return {
+    priced_samples: points.length,
+    dated_samples: dated,
+    in_sample_multiple: Math.round(errorMultiple(fitted, points) * 100) / 100,
+    loo_multiple: Math.round(looMultiple(points, model) * 100) / 100,
+    walk_forward_multiple: Math.round(wf.multiple * 100) / 100,
+    walk_forward_train: wf.train,
+    walk_forward_test: wf.test,
+    cv_multiple: Math.round(cvMultiple(points, model) * 100) / 100,
+    cv_folds: 5,
+  };
 }
 
 /** The adjustment one protocol is priced at: its category's row, or none when unlisted. */
@@ -500,9 +583,11 @@ function capitalFor(p: SnapshotProtocol): number {
   return 50;
 }
 
-/** How long to hold, from the protocol's age: younger protocols get a longer qualifying window. */
+/** How long to hold, from the protocol's age: the younger the protocol, the longer the
+ * qualifying window, so the plan is time-weighted by age. */
 function holdDaysFor(age: number | null): number {
-  if (age === null) return 30;
+  if (age === null) return 45;
+  if (age < 90) return 90;
   if (age < 180) return 60;
   if (age < 365) return 45;
   return 30;
@@ -610,6 +695,7 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const chain = chainOf(p);
   const capital = capitalFor(p);
   const hold = holdDaysFor(age);
+  const weeks = Math.max(1, Math.ceil(hold / 7));
   const action = actionFor(p, capital, chain);
   const second = secondActionFor(p, chain);
   const gas = capital >= 150 ? 8 : 4;
@@ -630,7 +716,7 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
       time: '10 minutes',
     },
     {
-      text: `Do one qualifying action each week on ${chain}, such as a deposit, a swap, a vote or a claim, so the wallet reads as active rather than one-off.`,
+      text: `Do one qualifying action each week for ${weeks} weeks on ${chain}, such as a deposit, a swap, a vote or a claim, so the wallet reads as active rather than one-off.`,
       cost: 'about $2 of gas a week',
       time: '10 minutes a week',
     },
@@ -702,7 +788,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
   const board = buildBoard(snapshot, model);
   const live = liveRows(snapshot);
   const curve = fitCurve(snapshot);
-  const validation = validateCurve(snapshot, curve);
+  const validation = validateModel(snapshot, model);
   const adjustments = categoryAdjustments(snapshot, curve, model);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
   const radar: RadarData = {

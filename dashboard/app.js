@@ -36,7 +36,7 @@
     '<div><dt>Live tokens</dt><dd>' + R.live_size + '</dd></div>' +
     '<div><dt>Total implied value</dt><dd>' + money(topImplied) + '</dd></div>';
   $('meta').textContent = 'Snapshot ' + R.as_of + ' · watchlist floor ' + money(R.floor_usd) + ' · model ' + R.model_version + ' · ' + esc(R.source);
-  $('methodMeta').textContent = 'Model ' + R.model_version + ': implied = size curve × category adjustment × growth factor × maturity factor. The curve is fitted to this snapshot at run time; nothing is hardcoded by name.';
+  $('methodMeta').textContent = 'Model ' + R.model_version + ': implied = size curve × category adjustment × growth factor × maturity factor. The curve is fitted to this snapshot at run time and the adjustment is halved; nothing is hardcoded by name.';
 
   // ---- filters ----
   var cats = [];
@@ -138,12 +138,13 @@
       '<td class="num">' + pct(p.change_7d) + '</td></tr>';
   }).join('');
 
-  // ---- curve validation ----
+  // ---- model validation ----
   var v = R.validation;
   $('validStats').innerHTML =
     '<div><dt>In-sample error</dt><dd>' + v.in_sample_multiple.toFixed(2) + '×</dd></div>' +
     '<div><dt>Leave-one-out error</dt><dd>' + v.loo_multiple.toFixed(2) + '×</dd></div>' +
     '<div><dt>Walk-forward error</dt><dd>' + v.walk_forward_multiple.toFixed(2) + '×</dd></div>' +
+    '<div><dt>Cross-validation error</dt><dd>' + v.cv_multiple.toFixed(2) + '×</dd></div>' +
     '<div><dt>Priced protocols</dt><dd>' + v.priced_samples + '</dd></div>' +
     '<div><dt>Curve</dt><dd>' + R.curve.intercept.toFixed(2) + ' + ' + R.curve.slope.toFixed(3) + '·log TVL</dd></div>';
 
@@ -152,7 +153,7 @@
     return '<tr><td>' + esc(m.category) + '</td>' +
       '<td class="num">' + m.adjustment.toFixed(3) + '</td>' +
       '<td class="num">' + m.samples + '</td>' +
-      '<td>' + (m.adjusted ? 'Median residual of priced protocols in this category' : 'Fewer than 3 priced protocols — the curve alone prices it') + '</td></tr>';
+      '<td>' + (m.adjusted ? 'Median residual of priced protocols in this category, halved' : 'Fewer than 3 priced protocols — the curve alone prices it') + '</td></tr>';
   }).join('');
 
   // ---- events ----
